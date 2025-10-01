@@ -36,9 +36,15 @@ async def save_message(update, context):
     text = update.message.text
 
     try:
+        # Conexión a la DB con SSL
         conn = psycopg2.connect(DB_URL, sslmode="require")
         cur = conn.cursor()
 
+        # Debug: comprobar conexión
+        cur.execute("SELECT 1;")
+        logging.info("✅ Conexión a DB exitosa")
+
+        # Insertar mensaje
         cur.execute(
             "INSERT INTO mensajes (usuario, mensaje) VALUES (%s, %s)",
             (user, text)
@@ -48,12 +54,10 @@ async def save_message(update, context):
         cur.close()
         conn.close()
 
-        await update.message.reply_text(
-            f"✅ Hola {user}, registré tu mensaje: {text}"
-        )
+        await update.message.reply_text(f"✅ Guardado en DB: {text}")
     except Exception as e:
         logging.error(f"❌ Error guardando mensaje: {e}")
-        await update.message.reply_text("⚠️ Ocurrió un error guardando tu mensaje.")
+        await update.message.reply_text("⚠️ No pude guardar en la base de datos.")
 
 # Configuración del bot con retry para DB
 if __name__ == "__main__":
