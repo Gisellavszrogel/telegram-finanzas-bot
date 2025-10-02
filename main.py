@@ -1,122 +1,137 @@
 import os
 import logging
 import psycopg2
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
-)
+import time
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackQueryHandler, ConversationHandler
 
 logging.basicConfig(level=logging.INFO)
 
-# Variables de entorno
+# Variables de entorno (Railway)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DB_URL = os.getenv("DATABASE_PUBLIC_URL")  # usa el PUBLIC_URL para conexiones externas
+DB_URL = os.getenv("DATABASE_PUBLIC_URL")  # importante usar la pública
 
 # Estados de la conversación
-FECHA, MONTO, TIPO_GASTO, CATEGORIA, BANCO, DESCRIPCION = range(6)
+FECHA, MONTO, TIPO, CATEGORIA, BANCO, DESCRIPCION, METODO = range(7)
 
-# Categorías predefinidas
-TIPOS_GASTO = [["Comida", "Transporte", "Vivienda"],
-               ["Educación", "Ocio", "Salud"]]
-CATEGORIAS = [["Gasto", "Ingreso"]]
-
-# Conexión helper
-def insert_into_db(data):
+# Función auxiliar: crear tabla si no existe
+def ensure_table():
     conn = psycopg2.connect(DB_URL, sslmode="require")
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS finanzas (
             id SERIAL PRIMARY KEY,
             fecha DATE,
-            monto INT,
-            tipo_gasto TEXT,
+            monto REAL,
+            tipo TEXT,
             categoria TEXT,
             banco TEXT,
             descripcion TEXT,
-            creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            metodo_pago TEXT,
+            fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
-    cur.execute(
-        "INSERT INTO finanzas (fecha, monto, tipo_gasto, categoria, banco, descripcion) VALUES (%s, %s, %s, %s, %s, %s)",
-        (data["fecha"], data["monto"], data["tipo_gasto"], data["categoria"], data["banco"], data["descripcion"])
-    )
-    conn.commit()
     cur.close()
     conn.close()
+    logging.info("✅ Tabla 'finanzas' verificada/creada")
 
-# Paso 1: iniciar
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Ingresa la fecha del gasto (YYYY-MM-DD):")
+# --- Flujo de conversación ---
+async def start(update, context):
+    await update.message.reply_text("📅 Ingresa la fecha del movimiento (YYYY-MM-DD):")
     return FECHA
 
-# Paso 2: fecha
-async def fecha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def fecha(update, context):
     context.user_data["fecha"] = update.message.text
-    await update.message.reply_text("💰 Ingresa el monto:")
+    await update.message.reply_text("💲 Ingresa el monto:")
     return MONTO
 
-# Paso 3: monto
-async def monto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["monto"] = int(update.message.text)
-    await update.message.reply_text(
-        "🏷️ Selecciona el tipo de gasto:",
-        reply_markup=ReplyKeyboardMarkup(TIPOS_GASTO, one_time_keyboard=True)
-    )
-    return TIPO_GASTO
+async def monto(update, context):
+    context.user_data["monto"] = float(update.message.text)
+    await update.message.reply_text("📌 Es gasto o ingreso?")
+    return TIPO
 
-# Paso 4: tipo de gasto
-async def tipo_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tipo_gasto"] = update.message.text
-    await update.message.reply_text(
-        "¿Es gasto o ingreso?",
-        reply_markup=ReplyKeyboardMarkup(CATEGORIAS, one_time_keyboard=True)
-    )
+async def tipo(update, context):
+    context.user_data["tipo"] = update.message.text
+    await update.message.reply_text("📂 Ingresa la categoría (ej: comida, transporte, etc.):")
     return CATEGORIA
 
-# Paso 5: categoría
-async def categoria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def categoria(update, context):
     context.user_data["categoria"] = update.message.text
-    await update.message.reply_text("🏦 Ingresa el banco:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("🏦 Ingresa el banco:")
     return BANCO
 
-# Paso 6: banco
-async def banco(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def banco(update, context):
     context.user_data["banco"] = update.message.text
-    await update.message.reply_text("📝 Ingresa una descripción (opcional):")
+    await update.message.reply_text("📝 Ingresa una descripción:")
     return DESCRIPCION
 
-# Paso 7: descripción
-async def descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def descripcion(update, context):
     context.user_data["descripcion"] = update.message.text
 
-    # Guardar en DB
-    insert_into_db(context.user_data)
+    # Aquí mostramos los botones
+    keyboard = [
+        [InlineKeyboardButton("💳 Crédito", callback_data="credito")],
+        [InlineKeyboardButton("💳 Débito", callback_data="debito")],
+        [InlineKeyboardButton("📈 Inversión", callback_data="inversion")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Elige el método de pago:", reply_markup=reply_markup)
+    return METODO
 
-    resumen = (
-        f"✅ Registrado:\n"
-        f"Fecha: {context.user_data['fecha']}\n"
-        f"Monto: {context.user_data['monto']}\n"
-        f"Tipo de gasto: {context.user_data['tipo_gasto']}\n"
-        f"Categoría: {context.user_data['categoria']}\n"
-        f"Banco: {context.user_data['banco']}\n"
-        f"Descripción: {context.user_data['descripcion']}"
-    )
+async def metodo_pago(update, context):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["metodo_pago"] = query.data
 
-    await update.message.reply_text(resumen)
+    # Guardamos en DB
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO finanzas (fecha, monto, tipo, categoria, banco, descripcion, metodo_pago)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            context.user_data["fecha"],
+            context.user_data["monto"],
+            context.user_data["tipo"],
+            context.user_data["categoria"],
+            context.user_data["banco"],
+            context.user_data["descripcion"],
+            context.user_data["metodo_pago"]
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        await query.edit_message_text(
+            text=f"✅ Registro guardado:\n"
+                 f"📅 {context.user_data['fecha']}\n"
+                 f"💲 {context.user_data['monto']}\n"
+                 f"📌 {context.user_data['tipo']}\n"
+                 f"📂 {context.user_data['categoria']}\n"
+                 f"🏦 {context.user_data['banco']}\n"
+                 f"📝 {context.user_data['descripcion']}\n"
+                 f"💳 {context.user_data['metodo_pago']}"
+        )
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Error guardando en DB: {e}")
     return ConversationHandler.END
 
-# Cancelar
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Registro cancelado.", reply_markup=ReplyKeyboardRemove())
+async def cancel(update, context):
+    await update.message.reply_text("🚫 Operación cancelada.")
     return ConversationHandler.END
 
+# --- MAIN ---
 if __name__ == "__main__":
+    for i in range(5):
+        try:
+            ensure_table()
+            break
+        except Exception as e:
+            logging.error(f"❌ Intento {i+1} fallido: {e}")
+            time.sleep(5)
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -124,10 +139,11 @@ if __name__ == "__main__":
         states={
             FECHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, fecha)],
             MONTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, monto)],
-            TIPO_GASTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, tipo_gasto)],
+            TIPO: [MessageHandler(filters.TEXT & ~filters.COMMAND, tipo)],
             CATEGORIA: [MessageHandler(filters.TEXT & ~filters.COMMAND, categoria)],
             BANCO: [MessageHandler(filters.TEXT & ~filters.COMMAND, banco)],
             DESCRIPCION: [MessageHandler(filters.TEXT & ~filters.COMMAND, descripcion)],
+            METODO: [CallbackQueryHandler(metodo_pago)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
