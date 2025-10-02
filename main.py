@@ -17,7 +17,7 @@ DB_URL = os.getenv("DATABASE_PUBLIC_URL")  # importante usar la pública
 # Estados de la conversación
 FECHA, MONTO, TIPO, CATEGORIA, BANCO, DESCRIPCION, METODO = range(7)
 
-# Función auxiliar: crear tabla si no existe
+# Crear tabla si no existe
 def ensure_table():
     conn = psycopg2.connect(DB_URL, sslmode="require")
     cur = conn.cursor()
@@ -37,9 +37,8 @@ def ensure_table():
     conn.commit()
     cur.close()
     conn.close()
-    logging.info("✅ Tabla 'finanzas' verificada/creada")
 
-# --- Flujo de conversación ---
+# --- Flujo ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📅 Ingresa la fecha del movimiento (YYYY-MM-DD):")
     return FECHA
@@ -52,7 +51,6 @@ async def fecha(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def monto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["monto"] = float(update.message.text)
 
-    # Botones para gasto/ingreso
     keyboard = [
         [InlineKeyboardButton("📉 Gasto", callback_data="Gasto")],
         [InlineKeyboardButton("📈 Ingreso", callback_data="Ingreso")]
@@ -65,7 +63,6 @@ async def tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data["tipo"] = query.data
 
-    # Botones de categorías
     keyboard = [
         [InlineKeyboardButton("🍔 Comida", callback_data="Comida"),
          InlineKeyboardButton("🚌 Transporte", callback_data="Transporte")],
@@ -94,7 +91,6 @@ async def banco(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["descripcion"] = update.message.text
 
-    # Botones método de pago
     keyboard = [
         [InlineKeyboardButton("💳 Crédito", callback_data="Crédito")],
         [InlineKeyboardButton("💳 Débito", callback_data="Débito")],
@@ -108,38 +104,35 @@ async def metodo_pago(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data["metodo_pago"] = query.data
 
-    # Guardamos en DB
-    try:
-        conn = psycopg2.connect(DB_URL, sslmode="require")
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO finanzas (fecha, monto, tipo, categoria, banco, descripcion, metodo_pago)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (
-            context.user_data["fecha"],
-            context.user_data["monto"],
-            context.user_data["tipo"],
-            context.user_data["categoria"],
-            context.user_data["banco"],
-            context.user_data["descripcion"],
-            context.user_data["metodo_pago"]
-        ))
-        conn.commit()
-        cur.close()
-        conn.close()
+    # Guardar en DB
+    conn = psycopg2.connect(DB_URL, sslmode="require")
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO finanzas (fecha, monto, tipo, categoria, banco, descripcion, metodo_pago)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (
+        context.user_data["fecha"],
+        context.user_data["monto"],
+        context.user_data["tipo"],
+        context.user_data["categoria"],
+        context.user_data["banco"],
+        context.user_data["descripcion"],
+        context.user_data["metodo_pago"]
+    ))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-        await query.edit_message_text(
-            text=f"✅ Registro guardado:\n"
-                 f"📅 {context.user_data['fecha']}\n"
-                 f"💲 {context.user_data['monto']}\n"
-                 f"📌 {context.user_data['tipo']}\n"
-                 f"📂 {context.user_data['categoria']}\n"
-                 f"🏦 {context.user_data['banco']}\n"
-                 f"📝 {context.user_data['descripcion']}\n"
-                 f"💳 {context.user_data['metodo_pago']}"
-        )
-    except Exception as e:
-        await query.edit_message_text(f"⚠️ Error guardando en DB: {e}")
+    await query.edit_message_text(
+        text=f"✅ Registro guardado:\n"
+             f"📅 {context.user_data['fecha']}\n"
+             f"💲 {context.user_data['monto']}\n"
+             f"📌 {context.user_data['tipo']}\n"
+             f"📂 {context.user_data['categoria']}\n"
+             f"🏦 {context.user_data['banco']}\n"
+             f"📝 {context.user_data['descripcion']}\n"
+             f"💳 {context.user_data['metodo_pago']}"
+    )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,14 +141,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- MAIN ---
 if __name__ == "__main__":
-    for i in range(5):
-        try:
-            ensure_table()
-            break
-        except Exception as e:
-            logging.error(f"❌ Intento {i+1} fallido: {e}")
-            time.sleep(5)
-
+    ensure_table()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
