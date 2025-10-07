@@ -160,7 +160,7 @@ if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Solo inicia el flujo si el texto es el exacto
-    entrada_manual = MessageHandler(filters.TEXT & filters.Regex("^🖋 Ingresar manualmente$"), activar_manual)
+    entrada_manual = MessageHandler(filters.TEXT & filters.Regex("Ingresar manualmente"), activar_manual)
 
     en_flujo = filters.TEXT & ~filters.COMMAND
 
