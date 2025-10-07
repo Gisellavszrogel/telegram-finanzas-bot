@@ -1,6 +1,6 @@
 python-telegram-bot==20.7
-   psycopg2-binary
-   requests
-   redis==5.0.1
-   rq==1.15.1
-   python-dotenv
+psycopg2-binary==2.9.9
+requests==2.31.0
+redis==5.0.1
+rq==1.15.1
+python-dotenv==1.0.0
