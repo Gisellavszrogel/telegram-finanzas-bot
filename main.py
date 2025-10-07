@@ -250,27 +250,91 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        action, gasto_id = query.data.split('_', 1)
-        gasto_id = int(gasto_id)
+        parts = query.data.split('_')
+        action = parts[0]
         
         conn = psycopg2.connect(DB_URL, sslmode="require")
         cursor = conn.cursor()
         
+        # CONFIRMAR GASTO
         if action == 'confirm':
+            gasto_id = int(parts[1])
             cursor.execute("UPDATE finanzas SET status = 'confirmed' WHERE id = %s", (gasto_id,))
             conn.commit()
-            await query.edit_message_text('✅ Guardado')
+            await query.edit_message_text('✅ *Gasto guardado correctamente!*', parse_mode='Markdown')
         
+        # CANCELAR
         elif action == 'cancel':
+            gasto_id = int(parts[1])
             cursor.execute("DELETE FROM finanzas WHERE id = %s", (gasto_id,))
             conn.commit()
-            await query.edit_message_text('🗑️ Cancelado')
+            await query.edit_message_text('🗑️ Gasto cancelado.')
+        
+        # SELECCIONAR MONTO (sin propina)
+        elif action == 'monto' and parts[1] == 'sin':
+            gasto_id = int(parts[2])
+            monto = float(parts[3])
+            cursor.execute("UPDATE finanzas SET monto = %s WHERE id = %s", (monto, gasto_id))
+            conn.commit()
+            await query.answer(f"✅ Registrado: ${monto:,.0f} (sin propina)")
+        
+        # SELECCIONAR MONTO (con propina)
+        elif action == 'monto' and parts[1] == 'con':
+            gasto_id = int(parts[2])
+            monto = float(parts[3])
+            cursor.execute("UPDATE finanzas SET monto = %s WHERE id = %s", (monto, gasto_id))
+            conn.commit()
+            await query.answer(f"✅ Registrado: ${monto:,.0f} (con propina)")
+        
+        # MONTO MANUAL
+        elif action == 'monto' and parts[1] == 'manual':
+            gasto_id = int(parts[2])
+            await query.edit_message_text(
+                f'💰 *Ingresa el monto que pagaste:*\n\nEscribe solo el número.',
+                parse_mode='Markdown'
+            )
+            context.user_data['esperando_monto_manual'] = gasto_id
+        
+        # CATEGORÍA OK
+        elif action == 'cat' and parts[1] == 'ok':
+            await query.answer("✅ Categoría confirmada")
+        
+        # CAMBIAR CATEGORÍA
+        elif action == 'cat' and parts[1] == 'change':
+            gasto_id = int(parts[2])
+            
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            
+            keyboard = [
+                [InlineKeyboardButton("Comida", callback_data=f"setcat_{gasto_id}_Comida"),
+                 InlineKeyboardButton("Transporte", callback_data=f"setcat_{gasto_id}_Transporte")],
+                [InlineKeyboardButton("Vivienda", callback_data=f"setcat_{gasto_id}_Vivienda"),
+                 InlineKeyboardButton("Educación", callback_data=f"setcat_{gasto_id}_Educación")],
+                [InlineKeyboardButton("Ocio", callback_data=f"setcat_{gasto_id}_Ocio"),
+                 InlineKeyboardButton("Salud", callback_data=f"setcat_{gasto_id}_Salud")]
+            ]
+            
+            await query.edit_message_text(
+                '🏷️ *Selecciona la categoría correcta:*',
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        # GUARDAR CATEGORÍA
+        elif action == 'setcat':
+            gasto_id = int(parts[1])
+            categoria = '_'.join(parts[2:])  # Por si tiene espacios
+            cursor.execute("UPDATE finanzas SET tipo_gasto = %s WHERE id = %s", (categoria, gasto_id))
+            conn.commit()
+            await query.answer(f"✅ Categoría: {categoria}")
+            await query.edit_message_text(f'✅ Categoría actualizada a: *{categoria}*\n\nUsa los botones anteriores para confirmar.', parse_mode='Markdown')
         
         cursor.close()
         conn.close()
         
     except Exception as e:
         logger.error(f"❌ Error: {e}")
+        await query.answer("❌ Error procesando")
 
 # =============================================================================
 # FLUJO MANUAL
@@ -369,6 +433,8 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     
+    # Handlers
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_unknown))
