@@ -254,3 +254,29 @@ No pude extraer los datos.
 
 if __name__ == "__main__":
     print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
+    if __name__ == "__main__":
+        
+    import base64
+
+    # 🔹 Ruta local de una imagen de prueba
+    imagen_prueba = "boleta.jpg"
+
+    # 🔹 Reemplaza por un gasto_id cualquiera (no importa si no existe)
+    gasto_id = 999
+    chat_id = 123456789  # tu chat_id real de Telegram
+    user_id = 123456789  # tu user_id real de Telegram
+
+    try:
+        print("🧪 Iniciando prueba de procesamiento local...\n")
+        with open(imagen_prueba, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        result = procesar_foto_job(gasto_id, b64, chat_id, user_id)
+        print("\n✅ Resultado de prueba:\n", result)
+
+    except Exception as e:
+        import traceback
+        print("\n❌ Error durante la prueba:")
+        traceback.print_exc()
+
+
