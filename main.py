@@ -128,8 +128,16 @@ def insert_into_db(data, status='manual'):
         raise
 
 # =============================================================================
-# COMANDO /nuevo
+# COMANDOS
 # =============================================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /start"""
+    await update.message.reply_text(
+        '👋 ¡Bienvenido a Mucho Derroche!\n\n'
+        'Bot para registrar tus gastos.\n\n'
+        'Usa /nuevo para registrar un gasto.'
+    )
 
 async def nuevo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra menú principal"""
