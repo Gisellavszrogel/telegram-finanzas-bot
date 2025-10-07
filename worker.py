@@ -230,9 +230,9 @@ def enviar_error_telegram(chat_id, gasto_id):
 Lo siento, no pude extraer los datos automáticamente.
 
 Posibles causas:
-• La imagen no es clara
-• El formato de la boleta no es reconocible
-• Error de conexión con el servicio
+- La imagen no es clara
+- El formato de la boleta no es reconocible
+- Error de conexión con el servicio
 
 ¿Qué quieres hacer?
 """
