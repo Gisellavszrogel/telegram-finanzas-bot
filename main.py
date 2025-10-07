@@ -214,10 +214,13 @@ async def recibir_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = psycopg2.connect(DB_URL, sslmode="require")
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO finanzas (status, image_path, telegram_user_id, telegram_chat_id)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        """, ('pending', image_path, user_id, chat_id))
+    INSERT INTO finanzas (
+        status, image_path, telegram_user_id, telegram_chat_id,
+        metodo_pago, fecha, monto, tipo_gasto, categoria, banco, descripcion
+    )
+    VALUES (%s, %s, %s, %s, 'Por definir', CURRENT_DATE, 0, 'Pendiente', 'Pendiente', 'Pendiente', 'Procesando boleta...')
+    RETURNING id
+""", ('pending', image_path, user_id, chat_id))
         
         gasto_id = cursor.fetchone()[0]
         conn.commit()
