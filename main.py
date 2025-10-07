@@ -1,12 +1,17 @@
-"""
-Worker que procesa fotos de boletas desde base64
-"""
 import os
 import logging
-import requests
 import psycopg2
 from datetime import datetime
-import json
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 import base64
 import io
 
@@ -16,233 +21,352 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv('DATABASE_PUBLIC_URL')
-N8N_ENDPOINT = os.getenv('N8N_ENDPOINT')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+# Variables de entorno
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DB_URL = os.getenv("DATABASE_PUBLIC_URL")
 
-def procesar_foto_job(gasto_id, image_base64, chat_id, user_id):
-    """
-    Procesa foto desde base64
-    """
-    logger.info(f"🔄 Procesando gasto_id={gasto_id}")
-    
-    try:
-        logger.info(f"📤 Enviando imagen a n8n...")
-        ocr_data = enviar_a_n8n(image_base64)
-        
-        if not ocr_data:
-            raise Exception("n8n no devolvió datos válidos")
-        
-        logger.info(f"✅ Datos recibidos: {ocr_data}")
-        
-        actualizar_bd(gasto_id, ocr_data, status='processed')
-        enviar_confirmacion_telegram(chat_id, gasto_id, ocr_data)
-        
-        logger.info(f"✅ Completado gasto_id={gasto_id}")
-        return {'success': True, 'gasto_id': gasto_id, 'data': ocr_data}
-        
-    except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        
-        try:
-            actualizar_bd(gasto_id, {'error': str(e)}, status='error')
-        except:
-            pass
-        
-        enviar_error_telegram(chat_id, gasto_id)
-        raise
+# Estados de la conversación
+MENU, ESPERANDO_FOTO = range(2)
+FECHA, MONTO, TIPO_GASTO, CATEGORIA, BANCO, DESCRIPCION, METODO_PAGO = range(2, 9)
 
-def enviar_a_n8n(image_base64):
-    """
-    Envía imagen en base64 a n8n
-    """
-    logger.info(f"📤 Enviando a n8n: {N8N_ENDPOINT}")
-    
-    if not N8N_ENDPOINT:
-        logger.error("❌ N8N_ENDPOINT no configurado")
-        return None
-    
-    try:
-        # Decodificar base64
-        image_bytes = base64.b64decode(image_base64)
-        logger.info(f"✅ Imagen decodificada, tamaño: {len(image_bytes)} bytes")
-        
-        # Enviar como archivo
-        files = {'file': ('boleta.jpg', io.BytesIO(image_bytes), 'image/jpeg')}
-        
-        logger.info(f"🌐 POST a: {N8N_ENDPOINT}")
-        response = requests.post(N8N_ENDPOINT, files=files, timeout=60)
-        
-        logger.info(f"📥 Status: {response.status_code}")
-        logger.info(f"📥 Response: {response.text[:500]}")
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        logger.info(f"✅ JSON recibido: {data}")
-        return data
-        
-    except requests.Timeout:
-        logger.error("⏱️ Timeout (>60s)")
-        return None
-    except requests.RequestException as e:
-        logger.error(f"🌐 Error de red: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.error(f"📄 Respuesta no es JSON: {response.text[:200]}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Error inesperado: {e}")
-        return None
+# Botones predefinidos
+MENU_PRINCIPAL = [
+    ['🖋 Ingresar manualmente'],
+    ['📸 Subir boleta (foto)']
+]
+TIPOS_GASTO = [["Comida", "Transporte", "Vivienda"],
+               ["Educación", "Ocio", "Salud"]]
+CATEGORIAS = [["Gasto", "Ingreso"]]
+METODOS_PAGO = [["Tarjeta Crédito", "Tarjeta Débito", "Inversión"]]
 
-def actualizar_bd(gasto_id, ocr_data, status):
-    """
-    Actualiza BD con datos del OCR
-    """
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def parse_fecha_ddmmyyyy(txt: str) -> str:
+    """Convierte DD-MM-YYYY a YYYY-MM-DD (ISO para Postgres)."""
+    return datetime.strptime(txt.strip(), "%d-%m-%Y").strftime("%Y-%m-%d")
+
+def parse_monto(txt: str) -> float:
+    """Normaliza monto en distintos formatos a float."""
+    s = txt.strip().replace("$", "").replace(" ", "")
+    if "," in s and s.count(",") == 1 and (("." in s and s.rfind(".") < s.rfind(",")) or "." not in s):
+        s = s.replace(".", "").replace(",", ".")
+    return float(s)
+
+def create_table():
+    """Crea o actualiza la tabla finanzas con soporte para base64"""
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn = psycopg2.connect(DB_URL, sslmode="require")
         cursor = conn.cursor()
         
-        fecha_str = ocr_data.get('fecha')
-        monto = ocr_data.get('monto')
-        categoria = ocr_data.get('categoria')
-        descripcion = ocr_data.get('descripcion')
-        tipo_gasto = ocr_data.get('tipo_gasto')
-        banco = ocr_data.get('banco')
-        
-        fecha_obj = None
-        if fecha_str:
-            try:
-                for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y']:
-                    try:
-                        fecha_obj = datetime.strptime(fecha_str, fmt).date()
-                        break
-                    except:
-                        continue
-            except:
-                logger.warning(f"⚠️ Fecha inválida: {fecha_str}")
-        
         cursor.execute("""
-            UPDATE finanzas 
-            SET 
-                status = %s,
-                ocr_data = %s,
-                processed_at = %s,
-                fecha = COALESCE(%s, fecha),
-                monto = COALESCE(%s, monto),
-                categoria = COALESCE(%s, categoria),
-                descripcion = COALESCE(%s, descripcion),
-                tipo_gasto = COALESCE(%s, tipo_gasto),
-                banco = COALESCE(%s, banco)
-            WHERE id = %s
-        """, (
-            status,
-            json.dumps(ocr_data),
-            datetime.now(),
-            fecha_obj,
-            float(monto) if monto else None,
-            categoria,
-            descripcion,
-            tipo_gasto,
-            banco,
-            gasto_id
-        ))
+            CREATE TABLE IF NOT EXISTS finanzas (
+                id SERIAL PRIMARY KEY,
+                fecha DATE,
+                monto REAL,
+                tipo_gasto TEXT,
+                categoria TEXT,
+                banco TEXT,
+                descripcion TEXT,
+                metodo_pago TEXT,
+                creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        
+        columnas_nuevas = [
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'manual'",
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS image_path TEXT",
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS ocr_data JSONB",
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS telegram_user_id BIGINT",
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT",
+            "ALTER TABLE finanzas ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP"
+        ]
+        
+        for query in columnas_nuevas:
+            try:
+                cursor.execute(query)
+            except Exception as e:
+                logger.warning(f"⚠️ Columna ya existe: {e}")
         
         conn.commit()
         cursor.close()
         conn.close()
-        
-        logger.info(f"💾 BD actualizada: gasto_id={gasto_id}, status={status}")
+        logger.info("✅ Tabla verificada")
         
     except Exception as e:
-        logger.error(f"❌ Error BD: {e}")
+        logger.error(f"❌ Error tabla: {e}")
         raise
 
-def enviar_confirmacion_telegram(chat_id, gasto_id, ocr_data):
-    """
-    Envía confirmación con botones
-    """
+def insert_into_db(data, status='manual'):
+    """Inserta un registro en la base de datos"""
     try:
-        monto = ocr_data.get('monto', 'No detectado')
-        if isinstance(monto, (int, float)):
-            monto = f"${monto:,.0f}".replace(',', '.')
-        
-        mensaje = f"""📋 *Datos extraídos:*
-
-💰 Monto: {monto}
-📅 Fecha: {ocr_data.get('fecha', 'No detectada')}
-🏷️ Categoría: {ocr_data.get('categoria', 'No detectada')}
-🏪 Comercio: {ocr_data.get('descripcion', 'No detectado')}
-
-¿Son correctos?"""
-        
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ Guardar", "callback_data": f"confirm_{gasto_id}"},
-                    {"text": "✏️ Editar", "callback_data": f"edit_{gasto_id}"}
-                ],
-                [
-                    {"text": "🗑️ Cancelar", "callback_data": f"cancel_{gasto_id}"}
-                ]
-            ]
-        }
-        
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': mensaje,
-            'parse_mode': 'Markdown',
-            'reply_markup': json.dumps(keyboard)
-        }
-        
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        
-        logger.info(f"✅ Confirmación enviada a chat_id={chat_id}")
-        
+        conn = psycopg2.connect(DB_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO finanzas 
+            (fecha, monto, tipo_gasto, categoria, banco, descripcion, metodo_pago, status) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                data["fecha"], 
+                data["monto"], 
+                data["tipo_gasto"], 
+                data["categoria"], 
+                data["banco"], 
+                data["descripcion"], 
+                data["metodo_pago"],
+                status
+            )
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Guardado")
     except Exception as e:
-        logger.error(f"❌ Error enviando mensaje: {e}")
+        logger.error(f"❌ Error: {e}")
         raise
 
-def enviar_error_telegram(chat_id, gasto_id):
-    """
-    Notifica error al usuario
-    """
+# =============================================================================
+# COMANDO /nuevo
+# =============================================================================
+
+async def nuevo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra menú principal"""
+    keyboard = ReplyKeyboardMarkup(MENU_PRINCIPAL, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        '👋 ¿Cómo quieres registrar tu gasto?',
+        reply_markup=keyboard
+    )
+    
+    context.user_data["in_conversation"] = True
+    return MENU
+
+# =============================================================================
+# MENÚ
+# =============================================================================
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja la selección del menú"""
+    text = update.message.text.lower()
+    
+    if 'manual' in text or '🖋' in text:
+        await update.message.reply_text(
+            '📅 Fecha (DD-MM-YYYY):',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return FECHA
+    
+    elif 'foto' in text or 'boleta' in text or '📸' in text:
+        await update.message.reply_text(
+            '📸 Envía la foto de tu boleta',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ESPERANDO_FOTO
+    
+    else:
+        await update.message.reply_text('❌ Usa los botones')
+        return MENU
+
+# =============================================================================
+# FOTO CON BASE64
+# =============================================================================
+
+async def recibir_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe foto y guarda como base64"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
     try:
-        mensaje = """❌ *Error procesando boleta*
-
-No pude extraer los datos.
-
-¿Qué hacer?"""
+        # Descargar foto
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
         
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "🖋 Ingresar manual", "callback_data": f"manual_{gasto_id}"},
-                    {"text": "🔄 Reintentar", "callback_data": f"retry_{gasto_id}"}
-                ],
-                [
-                    {"text": "🗑️ Cancelar", "callback_data": f"cancel_{gasto_id}"}
-                ]
-            ]
-        }
+        foto_bytes = io.BytesIO()
+        await file.download_to_memory(foto_bytes)
+        foto_bytes.seek(0)
         
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': mensaje,
-            'parse_mode': 'Markdown',
-            'reply_markup': json.dumps(keyboard)
-        }
+        # Convertir a base64
+        foto_base64 = base64.b64encode(foto_bytes.read()).decode('utf-8')
         
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        logger.info(f"📥 Foto en base64: {len(foto_base64)} chars")
         
-        logger.info(f"📨 Error enviado a chat_id={chat_id}")
+        # Guardar en BD
+        conn = psycopg2.connect(DB_URL, sslmode="require")
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO finanzas (
+                status, image_path, telegram_user_id, telegram_chat_id,
+                metodo_pago, fecha, monto, tipo_gasto, categoria, banco, descripcion
+            )
+            VALUES (%s, %s, %s, %s, 'Por definir', CURRENT_DATE, 0, 'Pendiente', 'Pendiente', 'Pendiente', 'Procesando...')
+            RETURNING id
+        """, ('pending', foto_base64, user_id, chat_id))
+        
+        gasto_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        logger.info(f"💾 ID={gasto_id}")
+        
+        # Encolar (IMPORTANTE: Importar aquí para evitar error de importación circular)
+        try:
+            from queue_manager import encolar_foto
+            job = encolar_foto(gasto_id, foto_base64, chat_id, user_id)
+            
+            if job:
+                await update.message.reply_text('⏳ *Procesando...*', parse_mode='Markdown')
+            else:
+                await update.message.reply_text('⚠️ Error al procesar')
+        except ImportError:
+            logger.warning("⚠️ queue_manager no disponible, procesando sin cola")
+            await update.message.reply_text('⚠️ Sistema de colas no disponible')
+        
+        context.user_data["in_conversation"] = False
+        return ConversationHandler.END
         
     except Exception as e:
-        logger.error(f"❌ Error enviando error: {e}")
+        logger.error(f"❌ Error: {e}", exc_info=True)
+        await update.message.reply_text('❌ Error')
+        return ConversationHandler.END
+
+# =============================================================================
+# CALLBACKS
+# =============================================================================
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja botones"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        action, gasto_id = query.data.split('_', 1)
+        gasto_id = int(gasto_id)
+        
+        conn = psycopg2.connect(DB_URL, sslmode="require")
+        cursor = conn.cursor()
+        
+        if action == 'confirm':
+            cursor.execute("UPDATE finanzas SET status = 'confirmed' WHERE id = %s", (gasto_id,))
+            conn.commit()
+            await query.edit_message_text('✅ Guardado')
+        
+        elif action == 'cancel':
+            cursor.execute("DELETE FROM finanzas WHERE id = %s", (gasto_id,))
+            conn.commit()
+            await query.edit_message_text('🗑️ Cancelado')
+        
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+
+# =============================================================================
+# FLUJO MANUAL
+# =============================================================================
+
+async def fecha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data["fecha"] = parse_fecha_ddmmyyyy(update.message.text)
+        await update.message.reply_text("💰 Monto:")
+        return MONTO
+    except ValueError:
+        await update.message.reply_text("❌ Formato inválido")
+        return FECHA
+
+async def monto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data["monto"] = parse_monto(update.message.text)
+        await update.message.reply_text(
+            "🏷️ Tipo:",
+            reply_markup=ReplyKeyboardMarkup(TIPOS_GASTO, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return TIPO_GASTO
+    except:
+        await update.message.reply_text("❌ Monto inválido")
+        return MONTO
+
+async def tipo_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tipo_gasto"] = update.message.text
+    await update.message.reply_text(
+        "Gasto o ingreso?",
+        reply_markup=ReplyKeyboardMarkup(CATEGORIAS, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return CATEGORIA
+
+async def categoria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["categoria"] = update.message.text
+    await update.message.reply_text("🏦 Banco:", reply_markup=ReplyKeyboardRemove())
+    return BANCO
+
+async def banco(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["banco"] = update.message.text
+    await update.message.reply_text("📝 Descripción:")
+    return DESCRIPCION
+
+async def descripcion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["descripcion"] = update.message.text if update.message.text.lower() != 'ninguna' else "Sin descripción"
+    await update.message.reply_text(
+        "💳 Método:",
+        reply_markup=ReplyKeyboardMarkup(METODOS_PAGO, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return METODO_PAGO
+
+async def metodo_pago(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["metodo_pago"] = update.message.text
+    
+    try:
+        insert_into_db(context.user_data)
+        await update.message.reply_text('✅ Guardado', reply_markup=ReplyKeyboardRemove())
+    except Exception as e:
+        logger.error(f"❌ {e}")
+        await update.message.reply_text("❌ Error", reply_markup=ReplyKeyboardRemove())
+    
+    context.user_data["in_conversation"] = False
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Cancelado", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Usa /nuevo")
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    logger.info("🔄 Iniciando...")
+    create_table()
+    
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("nuevo", nuevo)],
+        states={
+            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)],
+            ESPERANDO_FOTO: [MessageHandler(filters.PHOTO, recibir_foto)],
+            FECHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, fecha)],
+            MONTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, monto)],
+            TIPO_GASTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, tipo_gasto)],
+            CATEGORIA: [MessageHandler(filters.TEXT & ~filters.COMMAND, categoria)],
+            BANCO: [MessageHandler(filters.TEXT & ~filters.COMMAND, banco)],
+            DESCRIPCION: [MessageHandler(filters.TEXT & ~filters.COMMAND, descripcion)],
+            METODO_PAGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, metodo_pago)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_unknown))
+    
+    logger.info("🚀 Bot iniciado")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
+    main()
