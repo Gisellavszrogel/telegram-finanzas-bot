@@ -27,19 +27,13 @@ def procesar_foto_job(gasto_id, image_base64, chat_id, user_id):
     logger.info(f"🔄 Procesando gasto_id={gasto_id}")
     
     try:
-        # MODO DEBUG: Usar datos de prueba sin llamar a n8n
-        logger.info(f"🧪 MODO DEBUG: Usando datos de prueba")
+        logger.info(f"📤 Enviando imagen a n8n...")
+        ocr_data = enviar_a_n8n(image_base64)
         
-        ocr_data = {
-            'monto': 15000,
-            'fecha': '2025-10-07',
-            'categoria': 'Alimentación',
-            'descripcion': 'Prueba de boleta',
-            'tipo_gasto': 'Comida',
-            'banco': 'Santander'
-        }
+        if not ocr_data:
+            raise Exception("n8n no devolvió datos válidos")
         
-        logger.info(f"✅ Datos de prueba: {ocr_data}")
+        logger.info(f"✅ Datos recibidos de n8n: {ocr_data}")
         
         actualizar_bd(gasto_id, ocr_data, status='processed')
         enviar_confirmacion_telegram(chat_id, gasto_id, ocr_data)
