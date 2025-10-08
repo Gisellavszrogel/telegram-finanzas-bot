@@ -71,8 +71,8 @@ def enviar_a_n8n(image_base64):
         image_file = io.BytesIO(image_bytes)
         image_file.seek(0)
 
-        # Enviar como multipart/form-data
-        files = {'file': ('boleta.jpg', image_file, 'image/jpeg')}
+        # Enviar como multipart/form-data con nombre fijo 'imagen'
+        files = {'imagen': ('boleta.jpg', image_file, 'image/jpeg')}
 
         logger.info(f"🌐 Enviando POST a: {N8N_ENDPOINT}")
         response = requests.post(N8N_ENDPOINT, files=files, timeout=60)
@@ -268,4 +268,4 @@ No pude extraer los datos.
         logger.error(f"❌ Error enviando error: {e}")
 
 if __name__ == "__main__":
-    print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
+    print("⚠️ Ejecutar con: python start_worker.py")
