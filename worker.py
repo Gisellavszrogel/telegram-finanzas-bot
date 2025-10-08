@@ -25,30 +25,30 @@ def procesar_foto_job(gasto_id, image_base64, chat_id, user_id):
     Procesa foto desde base64
     """
     logger.info(f"🔄 Procesando gasto_id={gasto_id}")
-    
+
     try:
         logger.info(f"📤 Enviando imagen a n8n...")
         ocr_data = enviar_a_n8n(image_base64)
-        
+
         if not ocr_data:
             raise Exception("n8n no devolvió datos válidos")
-        
+
         logger.info(f"✅ Datos recibidos de n8n: {ocr_data}")
-        
+
         actualizar_bd(gasto_id, ocr_data, status='processed')
         enviar_confirmacion_telegram(chat_id, gasto_id, ocr_data)
-        
+
         logger.info(f"✅ Completado gasto_id={gasto_id}")
         return {'success': True, 'gasto_id': gasto_id, 'data': ocr_data}
-        
+
     except Exception as e:
         logger.error(f"❌ Error: {e}")
-        
+
         try:
             actualizar_bd(gasto_id, {'error': str(e)}, status='error')
         except:
             pass
-        
+
         enviar_error_telegram(chat_id, gasto_id)
         raise
 
@@ -59,24 +59,216 @@ def enviar_a_n8n(image_base64):
     if not N8N_ENDPOINT:
         logger.error("❌ N8N_ENDPOINT no configurado")
         return None
-    
+
     try:
         logger.info(f"📤 Preparando imagen para n8n...")
-        
+
         # Decodificar base64
         image_bytes = base64.b64decode(image_base64)
         logger.info(f"✅ Imagen decodificada, tamaño: {len(image_bytes)} bytes")
-        
+
         # Crear archivo en memoria
         image_file = io.BytesIO(image_bytes)
         image_file.seek(0)
-        
+
         # Enviar como multipart/form-data
         files = {'file': ('boleta.jpg', image_file, 'image/jpeg')}
-        
+
         logger.info(f"🌐 Enviando POST a: {N8N_ENDPOINT}")
         response = requests.post(N8N_ENDPOINT, files=files, timeout=60)
-        
+
+        logger.info(f"📥 Status code: {response.status_code}")
+        logger.info(f"📥 Response preview: {response.text[:300] if response.text else '(vacío)'}")
+
+        response.raise_for_status()
+
+        # Verificar que la respuesta no esté vacía
+        if not response.text or response.text.strip() == '':
+            logger.error(f"❌ N8N devolvió respuesta vacía")
+            logger.error(f"💡 SOLUCIÓN: Verifica el nodo 'Respond to Webhook' en tu workflow de N8N")
+            logger.error(f"💡 Debe retornar JSON con: monto, fecha, categoria, tipo_gasto, descripcion, banco")
+            return None
+
+        try:
+            data = response.json()
+            logger.info(f"✅ JSON recibido correctamente: {data}")
+
+            # Validar que tenga los campos mínimos
+            if not isinstance(data, dict):
+                logger.error(f"❌ Respuesta no es un objeto JSON válido")
+                return None
+
+            return data
+
+        except ValueError as e:
+            logger.error(f"❌ Respuesta no es JSON válido: {response.text[:200]}")
+            logger.error(f"💡 N8N debe retornar Content-Type: application/json")
+            return None
+
+    except base64.binascii.Error as e:
+        logger.error(f"❌ Error decodificando base64: {e}")
+        return None
+    except requests.Timeout:
+        logger.error("⏱️ Timeout esperando respuesta de n8n (>60s)")
+        return None
+    except requests.RequestException as e:
+        logger.error(f"🌐 Error de conexión con n8n: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error inesperado: {type(e).__name__}: {e}")
+        return None
+
+def actualizar_bd(gasto_id, ocr_data, status):
+    """
+    Actualiza BD con datos del OCR
+    """
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cursor = conn.cursor()
+
+        fecha_str = ocr_data.get('fecha')
+        monto = ocr_data.get('monto')
+        categoria = ocr_data.get('categoria')
+        descripcion = ocr_data.get('descripcion')
+        tipo_gasto = ocr_data.get('tipo_gasto')
+        banco = ocr_data.get('banco')
+
+        fecha_obj = None
+        if fecha_str:
+            try:
+                for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y']:
+                    try:
+                        fecha_obj = datetime.strptime(fecha_str, fmt).date()
+                        break
+                    except:
+                        continue
+            except:
+                logger.warning(f"⚠️ Fecha inválida: {fecha_str}")
+
+        cursor.execute("""
+            UPDATE finanzas
+            SET
+                status = %s,
+                ocr_data = %s,
+                processed_at = %s,
+                fecha = COALESCE(%s, fecha),
+                monto = COALESCE(%s, monto),
+                categoria = COALESCE(%s, categoria),
+                descripcion = COALESCE(%s, descripcion),
+                tipo_gasto = COALESCE(%s, tipo_gasto),
+                banco = COALESCE(%s, banco)
+            WHERE id = %s
+        """, (
+            status,
+            json.dumps(ocr_data),
+            datetime.now(),
+            fecha_obj,
+            float(monto) if monto else None,
+            categoria,
+            descripcion,
+            tipo_gasto,
+            banco,
+            gasto_id
+        ))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        logger.info(f"💾 BD actualizada: gasto_id={gasto_id}, status={status}")
+
+    except Exception as e:
+        logger.error(f"❌ Error BD: {e}")
+        raise
+
+def enviar_confirmacion_telegram(chat_id, gasto_id, ocr_data):
+    """
+    Envía confirmación con botones
+    """
+    try:
+        monto = ocr_data.get('monto', 'No detectado')
+        if isinstance(monto, (int, float)):
+            monto = f"${monto:,.0f}".replace(',', '.')
+
+        mensaje = f"""📋 *Datos extraídos:*
+
+💰 Monto: {monto}
+📅 Fecha: {ocr_data.get('fecha', 'No detectada')}
+🏷️ Categoría: {ocr_data.get('categoria', 'No detectada')}
+🏪 Comercio: {ocr_data.get('descripcion', 'No detectado')}
+
+¿Son correctos?"""
+
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Guardar", "callback_data": f"confirm_{gasto_id}"},
+                    {"text": "✏️ Editar", "callback_data": f"edit_{gasto_id}"}
+                ],
+                [
+                    {"text": "🗑️ Cancelar", "callback_data": f"cancel_{gasto_id}"}
+                ]
+            ]
+        }
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': mensaje,
+            'parse_mode': 'Markdown',
+            'reply_markup': json.dumps(keyboard)
+        }
+
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+
+        logger.info(f"✅ Confirmación enviada a chat_id={chat_id}")
+
+    except Exception as e:
+        logger.error(f"❌ Error enviando mensaje: {e}")
+        raise
+
+def enviar_error_telegram(chat_id, gasto_id):
+    """
+    Notifica error al usuario
+    """
+    try:
+        mensaje = """❌ *Error procesando boleta*
+
+No pude extraer los datos.
+
+¿Qué hacer?"""
+
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🖋 Ingresar manual", "callback_data": f"manual_{gasto_id}"},
+                    {"text": "🔄 Reintentar", "callback_data": f"retry_{gasto_id}"}
+                ],
+                [
+                    {"text": "🗑️ Cancelar", "callback_data": f"cancel_{gasto_id}"}
+                ]
+            ]
+        }
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': mensaje,
+            'parse_mode': 'Markdown',
+            'reply_markup': json.dumps(keyboard)
+        }
+
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+
+        logger.info(f"📨 Error enviado a chat_id={chat_id}")
+
+    except Exception as e:
+        logger.error(f"❌ Error enviando error: {e}")
+
+if __name__ == "__main__":
+    print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
         logger.info(f"📥 Status code: {response.status_code}")
         logger.info(f"📥 Response preview: {response.text[:300]}")
         
@@ -255,4 +447,5 @@ No pude extraer los datos.
 if __name__ == "__main__":
     print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
     
+
 
