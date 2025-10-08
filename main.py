@@ -328,7 +328,69 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             await query.answer(f"✅ Categoría: {categoria}")
             await query.edit_message_text(f'✅ Categoría actualizada a: *{categoria}*\n\nUsa los botones anteriores para confirmar.', parse_mode='Markdown')
-        
+
+        # EDITAR GASTO
+        elif action == 'edit':
+            gasto_id = int(parts[1])
+
+            # Obtener datos actuales
+            cursor.execute("SELECT monto, tipo_gasto, descripcion, fecha FROM finanzas WHERE id = %s", (gasto_id,))
+            row = cursor.fetchone()
+
+            if row:
+                monto, tipo_gasto, descripcion, fecha = row
+
+                keyboard = [
+                    [InlineKeyboardButton("💰 Cambiar monto", callback_data=f"editmonto_{gasto_id}")],
+                    [InlineKeyboardButton("🏷️ Cambiar categoría", callback_data=f"cat_change_{gasto_id}")],
+                    [InlineKeyboardButton("📝 Cambiar descripción", callback_data=f"editdesc_{gasto_id}")],
+                    [InlineKeyboardButton("📅 Cambiar fecha", callback_data=f"editfecha_{gasto_id}")],
+                    [InlineKeyboardButton("✅ Guardar así", callback_data=f"confirm_{gasto_id}")]
+                ]
+
+                await query.edit_message_text(
+                    f'✏️ *Editando gasto #{gasto_id}*\n\n'
+                    f'💰 Monto: ${monto:,.0f}\n'
+                    f'🏷️ Categoría: {tipo_gasto}\n'
+                    f'📝 Descripción: {descripcion}\n'
+                    f'📅 Fecha: {fecha}\n\n'
+                    f'¿Qué quieres cambiar?',
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.answer("❌ Gasto no encontrado")
+
+        # EDITAR MONTO
+        elif action == 'editmonto':
+            gasto_id = int(parts[1])
+            await query.edit_message_text(
+                f'💰 *Editar monto del gasto #{gasto_id}*\n\n'
+                f'Escribe el nuevo monto (solo número):',
+                parse_mode='Markdown'
+            )
+            context.user_data['esperando_monto_editar'] = gasto_id
+
+        # EDITAR DESCRIPCIÓN
+        elif action == 'editdesc':
+            gasto_id = int(parts[1])
+            await query.edit_message_text(
+                f'📝 *Editar descripción del gasto #{gasto_id}*\n\n'
+                f'Escribe la nueva descripción:',
+                parse_mode='Markdown'
+            )
+            context.user_data['esperando_desc_editar'] = gasto_id
+
+        # EDITAR FECHA
+        elif action == 'editfecha':
+            gasto_id = int(parts[1])
+            await query.edit_message_text(
+                f'📅 *Editar fecha del gasto #{gasto_id}*\n\n'
+                f'Escribe la nueva fecha (DD-MM-YYYY):',
+                parse_mode='Markdown'
+            )
+            context.user_data['esperando_fecha_editar'] = gasto_id
+
         cursor.close()
         conn.close()
         
@@ -404,8 +466,66 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelado", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+async def handle_edicion_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja la edición manual de campos (monto, descripción, fecha)"""
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode="require")
+        cursor = conn.cursor()
+
+        # EDITAR MONTO
+        if 'esperando_monto_editar' in context.user_data:
+            gasto_id = context.user_data.pop('esperando_monto_editar')
+            try:
+                nuevo_monto = parse_monto(update.message.text)
+                cursor.execute("UPDATE finanzas SET monto = %s WHERE id = %s", (nuevo_monto, gasto_id))
+                conn.commit()
+                await update.message.reply_text(f'✅ Monto actualizado a ${nuevo_monto:,.0f}\n\nUsa /nuevo para otro gasto.')
+            except:
+                await update.message.reply_text('❌ Monto inválido')
+
+        # EDITAR DESCRIPCIÓN
+        elif 'esperando_desc_editar' in context.user_data:
+            gasto_id = context.user_data.pop('esperando_desc_editar')
+            nueva_desc = update.message.text
+            cursor.execute("UPDATE finanzas SET descripcion = %s WHERE id = %s", (nueva_desc, gasto_id))
+            conn.commit()
+            await update.message.reply_text(f'✅ Descripción actualizada\n\nUsa /nuevo para otro gasto.')
+
+        # EDITAR FECHA
+        elif 'esperando_fecha_editar' in context.user_data:
+            gasto_id = context.user_data.pop('esperando_fecha_editar')
+            try:
+                nueva_fecha = parse_fecha_ddmmyyyy(update.message.text)
+                cursor.execute("UPDATE finanzas SET fecha = %s WHERE id = %s", (nueva_fecha, gasto_id))
+                conn.commit()
+                await update.message.reply_text(f'✅ Fecha actualizada\n\nUsa /nuevo para otro gasto.')
+            except:
+                await update.message.reply_text('❌ Fecha inválida (usa DD-MM-YYYY)')
+
+        # MONTO MANUAL (del callback original)
+        elif 'esperando_monto_manual' in context.user_data:
+            gasto_id = context.user_data.pop('esperando_monto_manual')
+            try:
+                monto = parse_monto(update.message.text)
+                cursor.execute("UPDATE finanzas SET monto = %s WHERE id = %s", (monto, gasto_id))
+                conn.commit()
+                await update.message.reply_text(f'✅ Monto registrado: ${monto:,.0f}\n\nUsa /nuevo para otro gasto.')
+            except:
+                await update.message.reply_text('❌ Monto inválido')
+
+        else:
+            await update.message.reply_text("👋 Usa /nuevo")
+
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"❌ Error editando: {e}")
+        await update.message.reply_text('❌ Error actualizando')
+
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Usa /nuevo")
+    """Handler para mensajes fuera de conversación"""
+    await handle_edicion_manual(update, context)
 
 # =============================================================================
 # MAIN
