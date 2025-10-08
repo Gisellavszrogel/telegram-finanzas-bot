@@ -255,3 +255,4 @@ No pude extraer los datos.
 if __name__ == "__main__":
     print("⚠️ Ejecutar con: rq worker fotos --url $REDIS_URL")
     
+
