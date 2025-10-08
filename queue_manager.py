@@ -24,28 +24,28 @@ except Exception as e:
 # Cola principal para procesamiento de fotos
 foto_queue = Queue('fotos', connection=redis_conn, default_timeout=300) if redis_conn else None
 
-def encolar_foto(gasto_id, image_path, chat_id, user_id):
+def encolar_foto(gasto_id, image_base64, chat_id, user_id):
     """
     Encola un trabajo para procesar una foto
-    
+
     Args:
         gasto_id: ID del registro en PostgreSQL
-        image_path: Ruta donde se guardó la imagen
+        image_base64: Imagen en formato base64
         chat_id: ID del chat de Telegram
         user_id: ID del usuario de Telegram
-    
+
     Returns:
         Job object de RQ o None si falla
     """
     if redis_conn is None or foto_queue is None:
         logger.error("❌ Redis no disponible, no se puede encolar")
         return None
-    
+
     try:
         job = foto_queue.enqueue(
             'worker.procesar_foto_job',  # Función que ejecutará el worker
             gasto_id,
-            image_path,
+            image_base64,
             chat_id,
             user_id,
             retry=Retry(max=3, interval=[10, 30, 60]),  # 3 reintentos: 10s, 30s, 60s
